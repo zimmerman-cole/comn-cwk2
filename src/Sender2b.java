@@ -45,7 +45,8 @@ public class Sender2b
         // The main thread's job is to add packets for socket_thread to send and monitor when it
         // detects there's space in the window.
         SocketThread socket_thread = new SocketThread();
-        new Thread(socket_thread).start();
+        Thread thread = new Thread(socket_thread);
+        thread.start();
 
         // =============================================================================================================
         // === Start sending the data ==================================================================================
@@ -62,6 +63,8 @@ public class Sender2b
         // Loops through each packet to be sent
         while (true) {
 
+            //System.out.println(Thread.activeCount() + " threads active");
+
             // Contains all information (seqNum, absNum, windowPosition, etc.) about last sent packet.
             PacketTracker last_sent_packet = socket_thread.lastPacketSent();
 
@@ -74,9 +77,12 @@ public class Sender2b
             }
         }
 
-        // Wait for socket_thread to finish.
-        while (true) {
-            if (socket_thread.isFinished()) break;
+        // Wait for socket thread to finish
+        try {
+            thread.join();
+        } catch (InterruptedException e) {
+            System.out.println("Thread interrupted?");
+            System.exit(0);
         }
 
         double trans_time = (System.currentTimeMillis() - start_time) / 1000.0;
@@ -95,39 +101,50 @@ public class Sender2b
     private static void load_file() {
 
         try {
-            File file = new File(filename);
+            File file = new File("/home/cole/Documents/COMN/" + filename);
             data = new byte[(int) file.length()];
             FileInputStream fis = new FileInputStream(file);
             fis.read(data);
-        } catch (FileNotFoundException e) {
-            try {
-                File file = new File("/mnt/shared/" + filename);
-                data = new byte[(int) file.length()];
-                FileInputStream fis = new FileInputStream(file);
-                fis.read(data);
-            } catch (FileNotFoundException e2) {
-                // FOR TESTING OUTSIDE VM
-                try {
-                    File file = new File("/afs/inf.ed.ac.uk/user/s14/s1455790/Desktop/" + filename);
-                    data = new byte[(int) file.length()];
-                    FileInputStream fis = new FileInputStream(file);
-                    fis.read(data);
-                } catch (FileNotFoundException e3) {
-                    e3.printStackTrace();
-                    System.out.println("File was not found. Please specify its full path, or put the file in mnt/shared and pass only the filename as an argument.");
-                    System.exit(0);
-                } catch (IOException i3) {
-                    i3.printStackTrace();
-                    System.exit(0);
-                }
-            } catch (IOException i2) {
-                i2.printStackTrace();
-                System.exit(0);
-            }
-        } catch (IOException i) {
-            i.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+            System.out.println("HUH");
             System.exit(0);
         }
+
+//        try {
+//            File file = new File(filename);
+//            data = new byte[(int) file.length()];
+//            FileInputStream fis = new FileInputStream(file);
+//            fis.read(data);
+//        } catch (FileNotFoundException e) {
+//            try {
+//                File file = new File("/mnt/shared/" + filename);
+//                data = new byte[(int) file.length()];
+//                FileInputStream fis = new FileInputStream(file);
+//                fis.read(data);
+//            } catch (FileNotFoundException e2) {
+//                // FOR TESTING OUTSIDE VM
+//                try {
+//                    File file = new File("/afs/inf.ed.ac.uk/user/s14/s1455790/Desktop/" + filename);
+//                    data = new byte[(int) file.length()];
+//                    FileInputStream fis = new FileInputStream(file);
+//                    fis.read(data);
+//                } catch (FileNotFoundException e3) {
+//                    e3.printStackTrace();
+//                    System.out.println("File was not found. Please specify its full path, or put the file in mnt/shared and pass only the filename as an argument.");
+//                    System.exit(0);
+//                } catch (IOException i3) {
+//                    i3.printStackTrace();
+//                    System.exit(0);
+//                }
+//            } catch (IOException i2) {
+//                i2.printStackTrace();
+//                System.exit(0);
+//            }
+//        } catch (IOException i) {
+//            i.printStackTrace();
+//            System.exit(0);
+//        }
 
         // Break data down into packet-sized chunks (each with maximum size max_payload_length) and store
         // the chunks in data_packets (storing the same data twice, but whatever).
@@ -213,9 +230,11 @@ class PacketTracker implements Cloneable {
  */
 class SocketThread implements Runnable {
 
+    // Debug options:
     private final boolean debug = true;
     private final boolean promptEachTime = true;
     private final boolean lock_debug = true;
+    private final boolean retransmit_debug = true;
 
     // Maps window positions to packet trackers. This only contains
     // packets yet to be acknowledged in the window:
@@ -234,11 +253,10 @@ class SocketThread implements Runnable {
     private DatagramSocket socket;
     private DatagramPacket ack;
 
-    private final Object finished_lock = new Object();
-    private boolean finished;
     private boolean last_packet_received;
 
     private int num_retransmissions = 0;
+    private final short window_size = Sender2b.window_size;
 
     SocketThread() {
         this.to_be_acked = new HashMap<Short, PacketTracker>();
@@ -251,18 +269,7 @@ class SocketThread implements Runnable {
             this.quit();
         }
         this.ack = new DatagramPacket(new byte[Sender2b.header_length + 3], Sender2b.header_length + 3);
-        this.finished = false;
         this.last_packet_received = false;
-    }
-
-    boolean isFinished() {
-        boolean f = false;
-        synchronized (this.finished_lock) {
-            if (this.lock_debug) System.out.println("Finished lock acquired by isFinished().");
-            f = this.finished;
-        }
-        if (this.lock_debug) System.out.println("Finished lock released by isFinished().");
-        return f;
     }
 
     int numRetransmissions() {
@@ -270,7 +277,7 @@ class SocketThread implements Runnable {
     }
 
     PacketTracker lastPacketSent() {
-        PacketTracker tracker = null;
+        PacketTracker tracker;
         synchronized (this.last_packet_lock) {
             //if (this.lock_debug) System.out.println("Last packet lock acquired in lastPacketSent().");
             tracker = this.last_sent_packet.duplicate();
@@ -310,18 +317,34 @@ class SocketThread implements Runnable {
     @Override
     public void run() {
         while (true) {
+            synchronized (this.window_lock) {
+                // If the number of packets in the window is less than the window size, give the main thread some
+                // breathing room to add a packet to the pipeline
+                if (this.window_packets.size() < this.window_size) {
+                    try {
+                        Thread.sleep(2);
+                    } catch (InterruptedException e) {
+                        System.out.println("socket_thread interrupted???");
+                    }
+                }
+            }
+
             PacketTracker next_to_be_retransmitted;
             synchronized (this.window_lock) {
-                if (this.lock_debug) System.out.println("Window lock acquired for socket_thread while loop.");
+                if (this.lock_debug) System.out.println("Window lock acquired by socket_thread while loop.");
                 this.printDebug();
+                System.out.println("windowPos of next retransmission: " + this.next_retransmission);
 
                 // Retrieves the packet with the lowest time until timeout
                 next_to_be_retransmitted = this.to_be_acked.get(this.next_retransmission);
 
-                if (next_to_be_retransmitted == null) continue;
+                if (this.to_be_acked.size() == 0) {
+                    System.out.println("nothing to re-transmit; window is empty/all packets in it are acknowledged");
+                    continue;
+                }
 
                 synchronized (this.socket_lock) {
-                    if (this.lock_debug) System.out.println("Socket lock acquired for socket_thread while loop.");
+                    if (this.lock_debug) System.out.println("Socket lock acquired by socket_thread while loop.");
                     int time_until_retransmission = (int) (next_to_be_retransmitted.timestamp.getTime() - System.currentTimeMillis());
                     if (time_until_retransmission <= 5) {
                         this.sendPacket(next_to_be_retransmitted);
@@ -332,6 +355,7 @@ class SocketThread implements Runnable {
                         } catch (SocketTimeoutException e) {
                             // TIMEOUT: re-send packet and reset its timer
                             this.num_retransmissions++;
+                            if (this.retransmit_debug) System.out.println("Re-transmitting packet " + next_to_be_retransmitted.absoluteNumber + ", seqNum: " + next_to_be_retransmitted.sequenceNumber);
                             try {
                                 this.socket.send(next_to_be_retransmitted.packet);
                             } catch (IOException ex) {
@@ -368,6 +392,9 @@ class SocketThread implements Runnable {
 
                 // ACK is not a duplicate; mark as received, remove from to_be_acked and
                 // adjust window if necessary
+                if (this.debug) {
+                    System.out.println("NON-DUPE ACK RECEIVED: " + receivedPacket.absoluteNumber + ", " + receivedPacket.sequenceNumber);
+                }
                 this.to_be_acked.remove(receivedPacket.windowPosition);
                 if (receivedPacket.windowPosition != 0) continue;
                 else this.window_packets.remove(receivedSeqNum);
@@ -392,14 +419,8 @@ class SocketThread implements Runnable {
 
                 // If last packet has been received and window is empty,
                 // then all packets have been accounted for; exit thread
-                if (this.last_packet_received && this.window_packets.size() == 0) {
-                    synchronized (this.finished_lock) {
-                        if (this.lock_debug) System.out.println("Finished lock acquired by socket_thread while loop.");
-                        this.finished = true;
-                    }
-                    if (this.lock_debug) System.out.println("Finished lock released by socket_thread while loop.");
-                    break;
-                }
+                if (this.last_packet_received && this.window_packets.size() == 0) break;
+
 
                 // Update window positions in to_be_acked
                 for (short pos : this.to_be_acked.keySet()) {
@@ -426,9 +447,9 @@ class SocketThread implements Runnable {
                 // =====================================================================================================
 
             } // Release window lock
-            if (this.lock_debug) System.out.println("Window lock released by socket_thread while loop.");
-
         } // End of while loop
+        if (this.lock_debug) System.out.println("Window lock released by socket_thread while loop.");
+
     }
 
     /**
@@ -438,7 +459,9 @@ class SocketThread implements Runnable {
     private void printDebug() {
         if (this.promptEachTime) {
             try {
-                new BufferedReader(new InputStreamReader(System.in)).readLine();
+                if (new BufferedReader(new InputStreamReader(System.in)).readLine() == "exit") {
+                    this.quit();
+                }
             } catch (IOException e) {
                 e.printStackTrace();
             }

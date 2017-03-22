@@ -8,7 +8,7 @@ public class Receiver2b
 {
     private static final int header_length = 3;
     private static final int max_payload_length = 1024;
-    private static final int debug_level = 0;
+    private static final int debug_level = 1;
     private static final boolean map_debug = true;
 
     private static DatagramSocket receiver_socket;
