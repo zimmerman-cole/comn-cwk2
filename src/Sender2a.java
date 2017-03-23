@@ -9,30 +9,29 @@ public class Sender2a
 {
     private static final int header_length = 3;
     private static final int max_payload_length = 1024;
+
+    // DEBUG OPTIONS:
     private static final boolean debug = false;
     private static final boolean map_debug = false;
     private static final boolean retransmit_debug = false;
     private static final boolean promptEachTime = false;
+    // ===============
 
     private static DatagramSocket sender_socket;
-    private static String receiverHostname;
-    private static int receiverPortNumber;
     private static String filename;
     private static byte[] data;
     private static byte[][] data_packets;
-    private static int timeout;
     private static int num_retransmissions = 0;
     private static long start_time;
-    private static short window_size;
 
     public static void main(String[] args) {
         // === Parse command-line arguments ================================
-        receiverHostname = args[0];
-        receiverPortNumber = Integer.parseInt(args[1]);
+        String receiverHostname = args[0];
+        int receiverPortNumber = Integer.parseInt(args[1]);
         filename = args[2];
-        timeout = Integer.parseInt(args[3]);
-        window_size = (short) Integer.parseInt(args[4]);
-        if (window_size >= 32767) {
+        int timeout = Integer.parseInt(args[3]);
+        short window_size = (short) Integer.parseInt(args[4]);
+        if (window_size <= 0 || window_size >= 32767) {
             System.out.println("Please enter a window size N such that 0 < N < 32767.");
             System.exit(0);
         }
@@ -50,11 +49,14 @@ public class Sender2a
         // === Start sending the data =====================================
         System.out.println("Sending data now.");
 
-        // Sequence numbers are in range [0, 32767] (using 0-based indexing)
-        short nextseqnum = 0;
-        short baseseqnum = 0;
+        // Sequence numbers are in range [1, 32767]
+        short nextseqnum = 1;
+        short baseseqnum = 1;
+        // Base contains the absolute position of a packet (as sequence numbers overflow), uses 0-based indexing
         int base = 0;
-        short nextseqpos = 0;
+
+        // Contains the window position of the next packet to be sent (1-based indexing)
+        short nextseqpos = 1;
 
         // Maps packets' absolute positions to their positions in the window.
         LinkedHashMap<Integer, Short> absToPositionMap = new LinkedHashMap<Integer, Short>((int)window_size);
@@ -69,19 +71,18 @@ public class Sender2a
             // Loops through each packet to be sent
             while (true) {
 
-                // === FOR DEBUGGING:
+                // === FOR DEBUGGING: ==================================================================================
                 if (promptEachTime) {
                     try {
-                        String prompt = new BufferedReader(new InputStreamReader(System.in)).readLine();
+                        new BufferedReader(new InputStreamReader(System.in)).readLine();
                     } catch (IOException e) {
                         e.printStackTrace();
                     }
                 }
-                // ===
 
                 if (debug) System.out.println("==========================================================");
                 if (debug) System.out.println("Window size: " + window_size);
-                if (debug) System.out.println("Base: " + base + ". baseseqnum: " + baseseqnum + ". nextseqnum: " + nextseqnum + ". nextseqpos: " + nextseqpos + ".\n");
+                if (debug) System.out.println("baseseqnum: " + baseseqnum + ". nextseqnum: " + nextseqnum + ". nextseqpos: " + nextseqpos + ".\n");
 
                 if (map_debug) {
                     System.out.println("ABSOLUTES TO SEQNUM POSITIONS:");
@@ -94,14 +95,15 @@ public class Sender2a
                     }
                     System.out.println();
                 }
+                // === /FOR DEBUGGING: =================================================================================
 
-                // Contains the absolute packet number of the next packet to be sent
-                int absolutePckNum = base + nextseqpos;
+                // Contains the absolute packet number of the next packet to be sent (0-based indexing)
+                int absolutePckNum = base + nextseqpos - 1;
 
                 // =====================================================================================================
                 // === Fill the pipeline if there's space left in window ===============================================
                 // =====================================================================================================
-                if (absolutePckNum != data_packets.length && nextseqpos < window_size) {
+                if (absolutePckNum != data_packets.length && nextseqpos <= window_size) {
                     // Assemble the next packet.
                     byte[] pck_data = new byte[header_length + data_packets[absolutePckNum].length];
                     System.arraycopy(data_packets[absolutePckNum], 0, pck_data, header_length, data_packets[absolutePckNum].length);
@@ -118,18 +120,18 @@ public class Sender2a
                         sender_socket.send(sendPacket);
                     } catch (IOException e) {
                         e.printStackTrace();
-                        System.out.println("IO/Error sending packet " + absolutePckNum + ", nextseqnum: " + nextseqnum + ".");
+                        System.out.println("IO/Error sending packet w/ seqNum: " + nextseqnum);
                         quit();
                     }
 
-                    if (debug) System.out.println("Sending packet " + absolutePckNum + ", sequence number: " + nextseqnum + ", position: " + nextseqpos + ".");
+                    if (debug) System.out.println("Sending packet, sequence number: " + nextseqnum + ", position: " + nextseqpos + ".");
 
                     // Store this packet's relative window position
                     absToPositionMap.put(absolutePckNum, nextseqpos);
                     seqToPositionMap.put(nextseqnum, nextseqpos);
 
                     // Increment nextseqnum and its relative position
-                    nextseqnum = (nextseqnum == 32767) ? 0 : (short)(nextseqnum + 1);
+                    nextseqnum = (nextseqnum == 32767) ? 1 : (short)(nextseqnum + 1);
                     nextseqpos++;
                     if (debug) System.out.println("==========================================================");
                     continue;
@@ -143,7 +145,7 @@ public class Sender2a
                     sender_socket.receive(rcvPacket);
                 } catch (SocketTimeoutException e) {
                     // === TIMEOUT: resend all sent packets in window ==================================================
-                    if (retransmit_debug) System.out.println("Retransmitting from base: " + base + ".");
+                    if (retransmit_debug) System.out.println("Retransmitting from baseseqnum: " + baseseqnum + ".");
                     num_retransmissions++;
 
                     for (int i = base; i < absolutePckNum; i++) {
@@ -152,8 +154,8 @@ public class Sender2a
                         System.arraycopy(data_packets[i], 0, pck_data, header_length, data_packets[i].length);
 
                         // Get packet's sequence number (handle overflows as well)
-                        int overflowedseqnum = (int) baseseqnum + (int) absToPositionMap.get(i);
-                        short seqnum = (overflowedseqnum > 32767) ? (short)(overflowedseqnum - 32767 - 1) : (short) overflowedseqnum;
+                        int overflowedseqnum = (int) baseseqnum + (int) absToPositionMap.get(i) - 1;
+                        short seqnum = (overflowedseqnum > 32767) ? (short)(overflowedseqnum - 32767) : (short) overflowedseqnum;
 
 
                         pck_data[1] = (byte) ((seqnum >> 8) & 0xff);
@@ -165,7 +167,7 @@ public class Sender2a
                             sender_socket.send(sendPacket);
                         } catch (IOException ex) {
                             ex.printStackTrace();
-                            System.out.println("IO/Error sending packet " + i + ", sequence number: " + seqnum + ".");
+                            System.out.println("IO/Error sending packet, sequence number: " + seqnum + ".");
                         }
                     }
                     if (debug) System.out.println("==========================================================");
@@ -174,7 +176,7 @@ public class Sender2a
 
                 } catch (IOException e) {
                     e.printStackTrace();
-                    System.out.println("IO/Error receiving ACK for packet " + absolutePckNum + ", nextseqnum: " + nextseqnum + ".");
+                    System.out.println("IO/Error receiving ACK for packet, nextseqnum: " + nextseqnum + ".");
                     quit();
                 }
 
@@ -192,37 +194,34 @@ public class Sender2a
                 Short receivedPos = seqToPositionMap.get(receivedSeq);
                 // Ignore ACKS from already-acknowledged packets
                 if (receivedPos == null) continue;
-                int receivedAbs = base + receivedPos;
+                int receivedAbs = base + receivedPos - 1;
 
-                if (debug) System.out.println("ACK received for packet " + receivedAbs + ", sequence number: " + receivedSeq + ", position: " + receivedPos + ".");
+                if (debug) System.out.println("ACK received for packet, sequence number: " + receivedSeq + ", position: " + receivedPos + ".");
 
                 // Remove (abs => seqPos) mappings for newly accounted-for packets
                 for (int i = base; i <= receivedAbs; i++) {
                     absToPositionMap.remove(i);
                 }
                 // Remove (seq => seqPos) mappings for newly accounted-for packets
-                for (int i = 0; i <= receivedPos; i++) {
-                    int overflowedseqnum = (int) baseseqnum + i;
-                    short seqnum = (overflowedseqnum > 32767) ? (short) (overflowedseqnum - 32767 - 1) : (short) overflowedseqnum;
+                for (int i = 1; i <= receivedPos; i++) {
+                    int overflowedseqnum = (int) baseseqnum + i - 1;
+                    short seqnum = (overflowedseqnum > 32767) ? (short) (overflowedseqnum - 32767) : (short) overflowedseqnum;
                     seqToPositionMap.remove(seqnum);
                 }
 
-                // Decrement the position values for the remaining mappings
-                Iterator<Integer> absKeySet = absToPositionMap.keySet().iterator();
-                while (absKeySet.hasNext()) {
-                    int key = absKeySet.next();
+                // Decrement the position values for the remaining mappings to reflect the window shift
+                for (int key : absToPositionMap.keySet()) {
                     absToPositionMap.put(key, (short)(absToPositionMap.get(key) - receivedPos - 1));
                 }
-                Iterator<Short> seqKeySet = seqToPositionMap.keySet().iterator();
-                while (seqKeySet.hasNext()) {
-                    short key = seqKeySet.next();
+                for (short key : seqToPositionMap.keySet()) {
                     seqToPositionMap.put(key, (short)(seqToPositionMap.get(key) - receivedPos - 1));
                 }
 
                 // Update base, baseseqnum, nextseqnum's window position
-                nextseqpos = (short) (nextseqpos - receivedPos - 1);
+                nextseqpos = (short) (nextseqpos - receivedPos);
                 base = receivedAbs + 1;
-                baseseqnum = (short) (receivedSeq + 1);
+                int overflowed_baseseq = (int) baseseqnum + 1;
+                baseseqnum = (overflowed_baseseq > 32767) ? 1 : (short) (receivedSeq + 1);
 
                 if (debug) System.out.println("==========================================================");
             }

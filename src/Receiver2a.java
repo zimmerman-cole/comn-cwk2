@@ -5,23 +5,23 @@ public class Receiver2a
 {
     private static final int header_length = 3;
     private static final int max_payload_length = 1024;
+
+    // DEBUG OPTIONS:
     private static final boolean debug = false;
     private static final boolean dup_debug = false;
 
     private static DatagramSocket receiver_socket;
-    private static int portNumber;
     private static String file_to_write;
     private static byte[] received_data = new byte[0];
     private static int num_duplicates = 0;
-    private static short window_size;
 
 
     public static void main(String[] args) {
 
-        portNumber = Integer.parseInt(args[0]);
+        int portNumber = Integer.parseInt(args[0]);
         file_to_write = args[1];
-        window_size = (short) Integer.parseInt(args[2]);
-        if (window_size >= 32767) {
+        short window_size = (short) Integer.parseInt(args[2]);
+        if (window_size <= 0 || window_size >= 32767) {
             System.out.println("Please enter a window size N such that 0 < N < 32767.");
             System.exit(0);
         }
@@ -35,11 +35,11 @@ public class Receiver2a
 
         // Last-message byte is stored in position 0 in the header.
         // Sequence numbers for this part are stored in packet.getData()[1,2]
-        // Sequence numbers are in range [0, 32767] (using 0-based indexing)
-        short expectedseqnum = 0;
+        // Sequence numbers are in range [1, 32767]
+        short expectedseqnum = 1;
         int numRcv = 0;
         byte[] ack_data = new byte[6];
-        System.arraycopy(new String("ACK").getBytes(), 0, ack_data, 3, 3);
+        System.arraycopy("ACK".getBytes(), 0, ack_data, 3, 3);
 
         // === Start receiving packets ============================
         try {
@@ -48,17 +48,16 @@ public class Receiver2a
                 DatagramPacket received_packet = new DatagramPacket(new byte[header_length + max_payload_length], header_length + max_payload_length);
                 receiver_socket.receive(received_packet);
 
+
                 short receivedSeq = (short)((received_packet.getData()[1] << 8) | received_packet.getData()[2] & 0xff);
                 if (debug) {
                     System.out.println("==================================================");
                     if (expectedseqnum != receivedSeq) System.out.println("DUPLICATE/OUT OF ORDER RECEIVED:");
-                    System.out.println("Exp abs: " + numRcv);
                     System.out.println("Exp seq: " + expectedseqnum);
                     System.out.println("Rcv seq: " + receivedSeq);
                 } else if (dup_debug && expectedseqnum != receivedSeq) {
                     System.out.println("==================================================");
                     System.out.println("DUPLICATE/OUT OF ORDER RECEIVED:");
-                    System.out.println("Exp abs: " + numRcv);
                     System.out.println("Exp seq: " + expectedseqnum);
                     System.out.println("Rcv seq: " + receivedSeq);
                 }
@@ -77,12 +76,12 @@ public class Receiver2a
                     receiver_socket.send(ack);
 
                     // Increment expected sequence number:
-                    expectedseqnum = (expectedseqnum == 32767) ? 0 : (short)(expectedseqnum + 1);
+                    expectedseqnum = (expectedseqnum == 32767) ? 1 : (short)(expectedseqnum + 1);
                     numRcv++;
 
                     // Received packet is duplicate/out of order; re-send ACK for last received packet
                 } else {
-                    short lastSeq = (expectedseqnum == 0) ? 32767 : (short)(expectedseqnum - 1);
+                    short lastSeq = (expectedseqnum == 1) ? 32767 : (short)(expectedseqnum - 1);
                     ack_data[0] = received_packet.getData()[0];
                     ack_data[1] = (byte) ((lastSeq >> 8) & 0xff);
                     ack_data[2] = (byte) (lastSeq & 0xff);
